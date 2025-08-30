@@ -26,8 +26,7 @@ import {
     take,
     merge,
     of,
-    //random, // Add random import
-    takeWhile, // Add takeWhile import
+    takeWhile,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -53,8 +52,8 @@ const Constants = {
     INITIAL_LIVES: 3,
     BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
     BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
-    MAX_SCORE: 10, // the game ends after 100 pipes
-    MAX_PIPES: 10, //only 100 pipes in the game
+    MAX_SCORE: 10, // the game ends after 10 points
+    MAX_PIPES: 10, // only 10 pipes in the game
 } as const;
 
 const Physics = {
@@ -65,6 +64,7 @@ const Physics = {
 // State processing
 type State = Readonly<{
     gameEnd: boolean;
+    gameVictory: boolean;
     birdPos: {
         y: number;
         velocity: number;
@@ -82,12 +82,13 @@ type State = Readonly<{
         active: boolean;
         direction: "up" | "down";
         timer: number;
-        velocity: number; // Add velocity to bounce state
+        velocity: number;
     };
 }>;
 
 const initialState: State = {
     gameEnd: false,
+    gameVictory: false,
     birdPos: {
         y: Viewport.CANVAS_HEIGHT / 2,
         velocity: 0,
@@ -100,7 +101,7 @@ const initialState: State = {
         active: false,
         direction: "up",
         timer: 0,
-        velocity: Constants.BOUNCE_VELOCITY_MIN, // Initialize with min velocity
+        velocity: Constants.BOUNCE_VELOCITY_MIN,
     },
 };
 
@@ -173,7 +174,7 @@ const processPipeCollisions = (
  * Updates the state by proceeding with one time step.
  */
 const tick = (s: State): State => {
-    if (s.gameEnd) return s;
+    if (s.gameEnd || s.gameVictory) return s;
 
     const birdX = Viewport.CANVAS_WIDTH * 0.3;
     const birdY = s.birdPos.y;
@@ -181,7 +182,7 @@ const tick = (s: State): State => {
     // Check if game should end due to max SCORE
     const shouldEndFromScore = s.score >= Constants.MAX_SCORE;
 
-    // Handle bounce effect if active using ternary expressions
+    // Handle bounce effect if active
     const newBounceState = s.bounce.active
         ? {
               ...s.bounce,
@@ -194,11 +195,11 @@ const tick = (s: State): State => {
     const newVelocity = s.bounce.active
         ? s.bounce.direction === "up"
             ? s.lives === 0
-                ? -Constants.BOUNCE_VELOCITY_MIN / 2 // Slow bounce when dead
-                : -s.bounce.velocity // Use stored bounce velocity
+                ? -Constants.BOUNCE_VELOCITY_MIN / 2
+                : -s.bounce.velocity
             : s.lives === 0
-              ? Constants.BOUNCE_VELOCITY_MIN / 2 // Slow bounce when dead
-              : s.bounce.velocity // Use stored bounce velocity
+              ? Constants.BOUNCE_VELOCITY_MIN / 2
+              : s.bounce.velocity
         : s.birdPos.velocity + Physics.GRAVITY;
 
     // Move pipes and update passed status using map
@@ -236,10 +237,11 @@ const tick = (s: State): State => {
         ? pipeCollision.hitTop
         : boundaryCollision.hitTop;
 
-    // Handle collision consequences using ternary expressions
+    // Handle collision consequences
     const shouldActivateBounce = hasCollision && !s.bounce.active;
     const newLives = shouldActivateBounce ? s.lives - 1 : s.lives;
-    const gameEnd = newLives <= 0 || shouldEndFromScore;
+    const gameEnd = newLives <= 0;
+    const gameVictory = shouldEndFromScore;
 
     // Generate random bounce velocity
     const randomBounceVelocity = shouldActivateBounce
@@ -255,14 +257,15 @@ const tick = (s: State): State => {
         ? {
               active: true,
               direction: hitTop ? ("down" as const) : ("up" as const),
-              timer: newLives === 0 ? 20 : 10, // Longer bounce when dead
-              velocity: randomBounceVelocity, // Store random velocity
+              timer: newLives === 0 ? 20 : 10,
+              velocity: randomBounceVelocity,
           }
         : newBounceState;
 
     return {
         ...s,
         gameEnd,
+        gameVictory,
         birdPos: {
             y: Math.max(
                 Birb.HEIGHT / 2,
@@ -284,7 +287,7 @@ const tick = (s: State): State => {
  * Adds a new pipe to the state
  */
 const addPipe = (s: State): State =>
-    s.gameEnd || s.pipeIdCounter >= Constants.MAX_PIPES // Stop generating after max pipes
+    s.gameEnd || s.pipeIdCounter >= Constants.MAX_PIPES
         ? s
         : {
               ...s,
@@ -370,6 +373,7 @@ const renderPipe = (svg: SVGSVGElement, pipe: State["pipes"][0]): void => {
  */
 const render = (): ((s: State) => void) => {
     const gameOver = document.querySelector("#gameOver") as SVGElement;
+    const youWin = document.querySelector("#youWin") as SVGElement;
     const livesText = document.querySelector("#livesText") as HTMLElement;
     const scoreText = document.querySelector("#scoreText") as HTMLElement;
     const svg = document.querySelector("#svgCanvas") as SVGSVGElement;
@@ -387,9 +391,12 @@ const render = (): ((s: State) => void) => {
         scoreText.textContent = `Score: ${s.score}`;
         livesText.textContent = `Lives: ${s.lives}`;
 
-        // Show/hide game over
+        // Show/hide game over and victory messages
         if (gameOver) {
             gameOver.style.visibility = s.gameEnd ? "visible" : "hidden";
+        }
+        if (youWin) {
+            youWin.style.visibility = s.gameVictory ? "visible" : "hidden";
         }
 
         // Clear previous game elements (pipes and bird)
@@ -437,7 +444,10 @@ export const state$ = (csvContents: string): Observable<State> => {
         scan((state, reducer) => reducer(state), initialState),
         // End the stream when game ends or maximum score reached
         takeWhile(
-            state => !state.gameEnd && state.score <= Constants.MAX_SCORE,
+            state =>
+                !state.gameEnd &&
+                !state.gameVictory &&
+                state.score <= Constants.MAX_SCORE,
             true,
         ),
     );
