@@ -24,6 +24,7 @@ import {
     scan,
     switchMap,
     take,
+    merge,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -44,6 +45,12 @@ const Constants = {
     TICK_RATE_MS: 500, // Might need to change this!
 } as const;
 
+//ADDED PHYSICS CONSTANT!!!
+const Physics = {
+    GRAVITY: 0.5,
+    JUMP_STRENGTH: -8, //y increases downward so its negative
+} as const;
+
 // User input
 
 type Key = "Space";
@@ -52,10 +59,18 @@ type Key = "Space";
 
 type State = Readonly<{
     gameEnd: boolean;
+    birdPos: {
+        y: number; //vertical position of birb
+        velocity: number; //vertical velocity of birb
+    };
 }>;
 
 const initialState: State = {
     gameEnd: false,
+    birdPos: {
+        y: Viewport.CANVAS_HEIGHT / 2, //positions the birb to the middle of the canvas
+        velocity: 0, //initial velocity, birb is stationary
+    },
 };
 
 /**
@@ -64,7 +79,15 @@ const initialState: State = {
  * @param s Current state
  * @returns Updated state
  */
-const tick = (s: State) => s;
+
+//Added physics to the tick function !!
+const tick = (s: State): State => ({
+    ...s,
+    birdPos: {
+        y: s.birdPos.y + s.birdPos.velocity,
+        velocity: s.birdPos.velocity + Physics.GRAVITY,
+    },
+});
 
 // Rendering (side effects)
 
@@ -114,6 +137,7 @@ const createSvgElement = (
     return elem;
 };
 
+// render is what happens when the page loads
 const render = (): ((s: State) => void) => {
     // Canvas elements
     const gameOver = document.querySelector("#gameOver") as SVGElement;
@@ -137,6 +161,10 @@ const render = (): ((s: State) => void) => {
      * @param s Current state
      */
     return (s: State) => {
+        //Added a const to clear the previous birb !!
+        const deadBird = svg.querySelector("image");
+        if (deadBird) svg.removeChild(deadBird);
+
         // Add birb to the main grid canvas
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
@@ -176,15 +204,33 @@ const render = (): ((s: State) => void) => {
 
 export const state$ = (csvContents: string): Observable<State> => {
     /** User input */
+    //user presses spacebar to make the birb jump
 
     const key$ = fromEvent<KeyboardEvent>(document, "keypress");
-    const fromKey = (keyCode: Key) =>
-        key$.pipe(filter(({ code }) => code === keyCode));
+    const Space$ = key$.pipe(
+        filter(({ code }) => code === "Space"),
+        map(() => Physics.JUMP_STRENGTH),
+    );
 
     /** Determines the rate of time steps */
     const tick$ = interval(Constants.TICK_RATE_MS);
 
-    return tick$.pipe(scan((s: State) => ({ gameEnd: false }), initialState));
+    return (
+        merge(
+            Space$.pipe(
+                map(velocity => (s: State) => ({
+                    ...s,
+                    birdPos: {
+                        ...s.birdPos,
+                        velocity: velocity, // applies the jump impulse
+                    },
+                })),
+            ),
+        ),
+        tick$
+            .pipe(map(() => tick))
+            .pipe(scan((state, reducer) => reducer(state), initialState))
+    );
 };
 
 // The following simply runs your main function on window load.  Make sure to leave it in place.
