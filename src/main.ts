@@ -42,14 +42,14 @@ const Birb = {
 } as const;
 
 const Constants = {
-    PIPE_WIDTH: 50,
-    TICK_RATE_MS: 40,
-    PIPE_SPAWN_INTERVAL: 1500,
-    PIPE_SPEED: 2,
-    PIPE_GAP: 120,
+    PIPE_WIDTH: 50, // width of pipes
+    TICK_RATE_MS: 40, // speed of bird flaps
+    PIPE_SPAWN_INTERVAL: 2000, //distance between each pipe, side by side
+    PIPE_SPEED: 4,
+    PIPE_GAP: 150, //distance between up and down pipes
     SCORE_PER_PIPE: 1,
     INITIAL_LIVES: 3,
-    BOUNCE_VELOCITY: 10,
+    BOUNCE_VELOCITY: 5,
 } as const;
 
 const Physics = {
