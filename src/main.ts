@@ -26,6 +26,8 @@ import {
     take,
     merge,
     of,
+    //random, // Add random import
+    takeWhile, // Add takeWhile import
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -49,7 +51,10 @@ const Constants = {
     PIPE_GAP: 150, //distance between up and down pipes
     SCORE_PER_PIPE: 1,
     INITIAL_LIVES: 3,
-    BOUNCE_VELOCITY: 5,
+    BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
+    BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
+    MAX_SCORE: 10, // the game ends after 100 pipes
+    MAX_PIPES: 10, //only 100 pipes in the game
 } as const;
 
 const Physics = {
@@ -77,6 +82,7 @@ type State = Readonly<{
         active: boolean;
         direction: "up" | "down";
         timer: number;
+        velocity: number; // Add velocity to bounce state
     };
 }>;
 
@@ -94,6 +100,7 @@ const initialState: State = {
         active: false,
         direction: "up",
         timer: 0,
+        velocity: Constants.BOUNCE_VELOCITY_MIN, // Initialize with min velocity
     },
 };
 
@@ -171,6 +178,9 @@ const tick = (s: State): State => {
     const birdX = Viewport.CANVAS_WIDTH * 0.3;
     const birdY = s.birdPos.y;
 
+    // Check if game should end due to max SCORE
+    const shouldEndFromScore = s.score >= Constants.MAX_SCORE;
+
     // Handle bounce effect if active using ternary expressions
     const newBounceState = s.bounce.active
         ? {
@@ -180,10 +190,15 @@ const tick = (s: State): State => {
           }
         : s.bounce;
 
+    // Calculate velocity - if lives are zero, use slower bounce
     const newVelocity = s.bounce.active
         ? s.bounce.direction === "up"
-            ? -Constants.BOUNCE_VELOCITY
-            : Constants.BOUNCE_VELOCITY
+            ? s.lives === 0
+                ? -Constants.BOUNCE_VELOCITY_MIN / 2 // Slow bounce when dead
+                : -s.bounce.velocity // Use stored bounce velocity
+            : s.lives === 0
+              ? Constants.BOUNCE_VELOCITY_MIN / 2 // Slow bounce when dead
+              : s.bounce.velocity // Use stored bounce velocity
         : s.birdPos.velocity + Physics.GRAVITY;
 
     // Move pipes and update passed status using map
@@ -224,14 +239,24 @@ const tick = (s: State): State => {
     // Handle collision consequences using ternary expressions
     const shouldActivateBounce = hasCollision && !s.bounce.active;
     const newLives = shouldActivateBounce ? s.lives - 1 : s.lives;
-    const gameEnd = newLives <= 0;
+    const gameEnd = newLives <= 0 || shouldEndFromScore;
 
-    // FIXED: Ensure direction is explicitly typed as 'up' or 'down'
+    // Generate random bounce velocity
+    const randomBounceVelocity = shouldActivateBounce
+        ? Math.floor(
+              Math.random() *
+                  (Constants.BOUNCE_VELOCITY_MAX -
+                      Constants.BOUNCE_VELOCITY_MIN +
+                      1),
+          ) + Constants.BOUNCE_VELOCITY_MIN
+        : s.bounce.velocity;
+
     const finalBounceState = shouldActivateBounce
         ? {
               active: true,
               direction: hitTop ? ("down" as const) : ("up" as const),
-              timer: 10,
+              timer: newLives === 0 ? 20 : 10, // Longer bounce when dead
+              velocity: randomBounceVelocity, // Store random velocity
           }
         : newBounceState;
 
@@ -259,7 +284,7 @@ const tick = (s: State): State => {
  * Adds a new pipe to the state
  */
 const addPipe = (s: State): State =>
-    s.gameEnd
+    s.gameEnd || s.pipeIdCounter >= Constants.MAX_PIPES // Stop generating after max pipes
         ? s
         : {
               ...s,
@@ -410,6 +435,11 @@ export const state$ = (csvContents: string): Observable<State> => {
     // Combine all streams
     return merge(space$, click$, tick$, pipeSpawn$).pipe(
         scan((state, reducer) => reducer(state), initialState),
+        // End the stream when game ends or maximum score reached
+        takeWhile(
+            state => !state.gameEnd && state.score <= Constants.MAX_SCORE,
+            true,
+        ),
     );
 };
 
