@@ -24,7 +24,8 @@ import {
     scan,
     switchMap,
     take,
-    merge,
+    merge, //added
+    of, //added
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -169,7 +170,7 @@ const render = (): ((s: State) => void) => {
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
             x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
-            y: `${Viewport.CANVAS_HEIGHT / 2 - Birb.HEIGHT / 2}`,
+            y: `${s.birdPos.y - Birb.HEIGHT / 2}`,
             width: `${Birb.WIDTH}`,
             height: `${Birb.HEIGHT}`,
         });
@@ -215,22 +216,18 @@ export const state$ = (csvContents: string): Observable<State> => {
     /** Determines the rate of time steps */
     const tick$ = interval(Constants.TICK_RATE_MS);
 
-    return (
-        merge(
-            Space$.pipe(
-                map(velocity => (s: State) => ({
-                    ...s,
-                    birdPos: {
-                        ...s.birdPos,
-                        velocity: velocity, // applies the jump impulse
-                    },
-                })),
-            ),
+    return merge(
+        Space$.pipe(
+            map(velocity => (s: State) => ({
+                ...s,
+                birdPos: {
+                    ...s.birdPos,
+                    velocity: velocity, // applies the jump impulse
+                },
+            })),
         ),
-        tick$
-            .pipe(map(() => tick))
-            .pipe(scan((state, reducer) => reducer(state), initialState))
-    );
+        tick$.pipe(map(() => tick)),
+    ).pipe(scan((state, reducer) => reducer(state), initialState));
 };
 
 // The following simply runs your main function on window load.  Make sure to leave it in place.
@@ -251,17 +248,22 @@ if (typeof window !== "undefined") {
         }),
         catchError(err => {
             console.error("Error fetching the CSV file:", err);
-            throw err;
+            return of("default");
         }),
     );
 
     // Observable: wait for first user click
     const click$ = fromEvent(document.body, "mousedown").pipe(take(1));
 
+    // create a render function for easier code
+    const renderFn = render();
+
     csv$.pipe(
         switchMap(contents =>
             // On click - start the game
             click$.pipe(switchMap(() => state$(contents))),
         ),
-    ).subscribe(render());
+    ).subscribe(state => {
+        renderFn(state);
+    });
 }
