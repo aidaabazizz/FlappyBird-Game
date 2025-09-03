@@ -47,8 +47,8 @@ const Birb = {
 
 const Constants = {
     PIPE_WIDTH: 50, // width of pipes
-    TICK_RATE_MS: 35, // speed of bird flaps
-    PIPE_SPAWN_INTERVAL: 2000, //distance between each pipe, side by side
+    TICK_RATE_MS: 30, // speed of bird flaps
+    PIPE_SPAWN_INTERVAL: 20, //distance between each pipe, side by side
     PIPE_SPEED: 5,
     PIPE_GAP: 150, //distance between up and down pipes
     SCORE_PER_PIPE: 1,
@@ -56,7 +56,7 @@ const Constants = {
     BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
     BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
     MAX_SCORE: 10, // the game ends after 10 points
-    MAX_PIPES: 10, // only 10 pipes in the game
+    MAX_PIPES: 20, // win game if passes 20 pipes/ score 20
 } as const;
 
 const Physics = {
@@ -95,6 +95,9 @@ type State = Readonly<{
         birdPositions: number[];
         currentIndex: number;
     };
+    csvPipes: ReadonlyArray<{ gapY: number; spawnTime: number }>; // Add this
+    gameStartTime: number; // Add this to track game timing
+    nextPipeIndex: number; // Add this to track next CSV pipe
 }>;
 
 const initialState: State = {
@@ -122,7 +125,11 @@ const initialState: State = {
         birdPositions: [],
         currentIndex: 0,
     },
+    csvPipes: [], // Initialize as empty
+    gameStartTime: 0, // Will be set when game starts
+    nextPipeIndex: 0, // Start from first pipe
 };
+
 /**
  * Check if bird collides with a pipe and which part it hit
  */
@@ -155,6 +162,33 @@ const checkPipeCollision = (
     };
 };
 
+/**
+ * Parses CSV content into pipe data using functional approach
+ */
+const parseCSVPipes = (
+    csvContent: string,
+): ReadonlyArray<{ gapY: number; spawnTime: number }> => {
+    if (csvContent === "default") {
+        // Fallback: generate some default pipes if CSV is not available
+        return Array.from({ length: 10 }, (_, i) => ({
+            gapY: Math.random() * (Viewport.CANVAS_HEIGHT - 200) + 100,
+            spawnTime: (i + 1) * 1500, // Default timing
+        }));
+    }
+
+    return csvContent
+        .trim()
+        .split("\n")
+        .slice(1) // Skip header
+        .filter(line => line.trim() !== "") // Remove empty lines
+        .map(line => {
+            const [gap_y, gap_height, time] = line.split(",").map(Number);
+            return {
+                gapY: gap_y * Viewport.CANVAS_HEIGHT, // Convert relative to absolute
+                spawnTime: time * 1000, // Convert seconds to milliseconds
+            };
+        });
+};
 /**
  * Check if bird hits ground or ceiling
  */
@@ -189,18 +223,51 @@ const processPipeCollisions = (
     );
 
 /**
- * Restart function - resets the game to initial state
+ * Spawns pipes based on CSV timing data
+ */
+const spawnPipesFromCSV = (s: State): State => {
+    if (s.gameEnd || s.gameVictory || s.nextPipeIndex >= s.csvPipes.length) {
+        return s;
+    }
+
+    const currentTime = Date.now() - s.gameStartTime;
+    const nextPipe = s.csvPipes[s.nextPipeIndex];
+
+    if (currentTime >= nextPipe.spawnTime) {
+        return {
+            ...s,
+            pipes: [
+                ...s.pipes,
+                {
+                    id: s.pipeIdCounter,
+                    x: Viewport.CANVAS_WIDTH,
+                    gapY: nextPipe.gapY,
+                    passed: false,
+                },
+            ],
+            pipeIdCounter: s.pipeIdCounter + 1,
+            nextPipeIndex: s.nextPipeIndex + 1,
+        };
+    }
+
+    return s;
+};
+
+/**
+ * Restart function - resets the game to initial state but keeps CSV pipes
  */
 const restartGame = (s: State): State => ({
     ...initialState,
+    csvPipes: s.csvPipes, // Keep the CSV pipes data
     ghostBird: {
         y: Viewport.CANVAS_HEIGHT / 2,
         visible: s.ghostBird.visible,
     },
     previousGameData: {
-        birdPositions: s.previousGameData.birdPositions, // Keep previous data for ghost
+        birdPositions: s.previousGameData.birdPositions,
         currentIndex: s.previousGameData.currentIndex,
     },
+    gameStartTime: Date.now(), // Reset game start time
 });
 /**
  * Records the current bird position for ghost playback
@@ -374,27 +441,6 @@ const tick = (s: State): State => {
 };
 
 /**
- * Adds a new pipe to the state
- */
-const addPipe = (s: State): State =>
-    s.gameEnd || s.pipeIdCounter >= Constants.MAX_PIPES
-        ? s
-        : {
-              ...s,
-              pipes: [
-                  ...s.pipes,
-                  {
-                      id: s.pipeIdCounter,
-                      x: Viewport.CANVAS_WIDTH,
-                      gapY:
-                          Math.random() * (Viewport.CANVAS_HEIGHT - 200) + 100,
-                      passed: false,
-                  },
-              ],
-              pipeIdCounter: s.pipeIdCounter + 1,
-          };
-
-/**
  * Jump function - makes the bird flap
  */
 const jump = (s: State): State =>
@@ -531,14 +577,14 @@ const render = (): ((s: State) => void) => {
 };
 
 /**
- * Main state observable
- */
-/**
  * Main state observable (without scan)
  */
 export const state$ = (
     csvContents: string,
 ): Observable<(s: State) => State> => {
+    // Parse CSV pipes once
+    const csvPipes = parseCSVPipes(csvContents);
+
     // User input - space key
     const key$ = fromEvent<KeyboardEvent>(document, "keydown");
     const space$ = key$.pipe(
@@ -552,9 +598,9 @@ export const state$ = (
     // Game tick
     const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
 
-    // Pipe spawn
-    const pipeSpawn$ = interval(Constants.PIPE_SPAWN_INTERVAL).pipe(
-        map(() => addPipe),
+    // CSV pipe spawn (replace the old pipeSpawn$)
+    const csvPipeSpawn$ = interval(Constants.TICK_RATE_MS).pipe(
+        map(() => spawnPipesFromCSV),
     );
 
     // Ghost bird update
@@ -573,17 +619,12 @@ export const state$ = (
         space$,
         click$,
         tick$,
-        pipeSpawn$,
+        csvPipeSpawn$, // Use CSV pipe spawn instead of random
         ghostBirdUpdate$,
         restart$,
-    ).pipe(
-        takeWhile(reducer => {
-            // We can't access state here easily, so we'll handle this differently
-            return true; // We'll handle takeWhile in the game initialization
-        }, true),
     );
 };
-// Game initialization
+
 // Game initialization
 if (typeof window !== "undefined") {
     const { protocol, hostname, port } = new URL(import.meta.url);
@@ -613,10 +654,18 @@ if (typeof window !== "undefined") {
 
     // Main game stream that can be restarted
     const game$ = (contents: string) => {
-        // Observable: wait for first user click and reset ghost data
+        // Parse CSV pipes
+        const csvPipes = parseCSVPipes(contents);
+
+        // Observable: wait for first user click
         const click$ = fromEvent(document, "click").pipe(
             take(1),
-            map(() => resetGhostData),
+            map(() => (s: State) => ({
+                ...resetGhostData(s),
+                csvPipes: csvPipes,
+                gameStartTime: Date.now(),
+                nextPipeIndex: 0,
+            })),
         );
 
         return click$.pipe(
