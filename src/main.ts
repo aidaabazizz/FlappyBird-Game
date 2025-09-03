@@ -264,7 +264,7 @@ const restartGame = (s: State): State => ({
     csvPipes: s.csvPipes, // Keep the CSV pipes data
     ghostBird: {
         y: Viewport.CANVAS_HEIGHT / 2,
-        visible: s.ghostBird.visible,
+        visible: true,
     },
     previousGameData: {
         birdPositions: s.previousGameData.birdPositions,
@@ -292,13 +292,21 @@ const recordBirdPosition = (s: State): State => {
  * Updates the ghost bird position based on recorded data
  */
 const updateGhostBird = (s: State): State => {
-    if (s.previousGameData.birdPositions.length === 0 || s.gameEnd) {
+    // Don't update ghost during first game or if no recorded data
+    if (s.isFirstGame || s.previousGameData.birdPositions.length === 0) {
         return { ...s, ghostBird: { ...s.ghostBird, visible: false } };
     }
 
-    const nextIndex =
-        (s.previousGameData.currentIndex + 1) %
-        s.previousGameData.birdPositions.length;
+    // Only advance the ghost if we're not at the end of the game
+    if (s.gameEnd || s.gameVictory) {
+        return s; // Keep current ghost position when game ends
+    }
+
+    const currentIndex = s.previousGameData.currentIndex;
+    const totalPositions = s.previousGameData.birdPositions.length;
+    
+    // If we've reached the end of recorded data, loop back
+    const nextIndex = (currentIndex + 1) % totalPositions;
     const ghostY = s.previousGameData.birdPositions[nextIndex];
 
     return {
@@ -549,7 +557,7 @@ const render = (): ((s: State) => void) => {
         // Clear previous game elements (pipes and birds)
         clearGameElements(svg);
 
-        // Add ghost bird (50% opacity) - only show if there's recorded data
+        // Add ghost bird (50% opacity) - only show if there's recorded data and not first game
         if (
             !s.isFirstGame &&
             s.ghostBird.visible &&
@@ -562,6 +570,7 @@ const render = (): ((s: State) => void) => {
                 width: `${Birb.WIDTH}`,
                 height: `${Birb.HEIGHT}`,
                 opacity: "0.5",
+                style: "pointer-events: none;", // Ensure ghost doesn't interfere with clicks
             });
             svg.appendChild(ghostBirdImg);
         }
@@ -608,8 +617,8 @@ export const state$ = (
         map(() => spawnPipesFromCSV),
     );
 
-    // Ghost bird update
-    const ghostBirdUpdate$ = interval(Constants.TICK_RATE_MS * 2).pipe(
+    // Ghost bird update - synchronize with main tick
+    const ghostBirdUpdate$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => updateGhostBird),
     );
 
@@ -657,6 +666,9 @@ if (typeof window !== "undefined") {
     // Create a subject to trigger game restarts
     const restartTrigger$ = new Subject<void>();
 
+    // Store the last game state for ghost bird data (moved to higher scope)
+    let lastGameState: State | null = null;
+
     // Main game stream that can be restarted
     const game$ = (contents: string) => {
         // Parse CSV pipes
@@ -665,12 +677,28 @@ if (typeof window !== "undefined") {
         // Observable: wait for first user click
         const click$ = fromEvent(document, "click").pipe(
             take(1),
-            map(() => (s: State) => ({
-                ...resetGhostData(s),
-                csvPipes: csvPipes,
-                gameStartTime: Date.now(),
-                nextPipeIndex: 0,
-            })),
+            map(() => (s: State) => {
+                // If we have a previous game state, preserve the bird positions for ghost
+                const baseState = lastGameState ? {
+                    ...initialState,
+                    isFirstGame: false,
+                    ghostBird: {
+                        y: Viewport.CANVAS_HEIGHT / 2,
+                        visible: true,
+                    },
+                    previousGameData: {
+                        birdPositions: lastGameState.previousGameData.birdPositions,
+                        currentIndex: 0, // Reset index for new playback
+                    },
+                } : initialState;
+                
+                return {
+                    ...baseState,
+                    csvPipes: csvPipes,
+                    gameStartTime: Date.now(),
+                    nextPipeIndex: 0,
+                };
+            }),
         );
 
         return click$.pipe(
@@ -679,7 +707,13 @@ if (typeof window !== "undefined") {
 
                 return state$(contents).pipe(
                     scan((state, reducer) => reducer(state), currentState),
-                    tap(state => renderFn(state)),
+                    tap(state => {
+                        renderFn(state);
+                        // Store the state when game ends for ghost bird data
+                        if (state.gameEnd || state.gameVictory) {
+                            lastGameState = state;
+                        }
+                    }),
                     takeWhile(
                         state => !state.gameEnd && !state.gameVictory,
                         true,
