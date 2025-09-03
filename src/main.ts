@@ -66,6 +66,7 @@ const Physics = {
 
 // State processing
 type State = Readonly<{
+    isFirstGame: boolean;
     gameEnd: boolean;
     gameVictory: boolean;
     birdPos: {
@@ -95,12 +96,13 @@ type State = Readonly<{
         birdPositions: number[];
         currentIndex: number;
     };
-    csvPipes: ReadonlyArray<{ gapY: number; spawnTime: number }>; // Add this
-    gameStartTime: number; // Add this to track game timing
-    nextPipeIndex: number; // Add this to track next CSV pipe
+    csvPipes: ReadonlyArray<{ gapY: number; spawnTime: number }>;
+    gameStartTime: number;
+    nextPipeIndex: number;
 }>;
 
 const initialState: State = {
+    isFirstGame: true,
     gameEnd: false,
     gameVictory: false,
     birdPos: {
@@ -258,6 +260,7 @@ const spawnPipesFromCSV = (s: State): State => {
  */
 const restartGame = (s: State): State => ({
     ...initialState,
+    isFirstGame: false, // A restart marks the end of the first game
     csvPipes: s.csvPipes, // Keep the CSV pipes data
     ghostBird: {
         y: Viewport.CANVAS_HEIGHT / 2,
@@ -269,6 +272,7 @@ const restartGame = (s: State): State => ({
     },
     gameStartTime: Date.now(), // Reset game start time
 });
+
 /**
  * Records the current bird position for ghost playback
  */
@@ -547,6 +551,7 @@ const render = (): ((s: State) => void) => {
 
         // Add ghost bird (50% opacity) - only show if there's recorded data
         if (
+            !s.isFirstGame &&
             s.ghostBird.visible &&
             s.previousGameData.birdPositions.length > 0
         ) {
