@@ -84,6 +84,14 @@ type State = Readonly<{
         timer: number;
         velocity: number;
     };
+    ghostBird: {
+        y: number;
+        visible: boolean;
+    };
+    previousGameData: {
+        birdPositions: number[];
+        currentIndex: number;
+    };
 }>;
 
 const initialState: State = {
@@ -103,8 +111,15 @@ const initialState: State = {
         timer: 0,
         velocity: Constants.BOUNCE_VELOCITY_MIN,
     },
+    ghostBird: {
+        y: Viewport.CANVAS_HEIGHT / 2,
+        visible: false,
+    },
+    previousGameData: {
+        birdPositions: [],
+        currentIndex: 0,
+    },
 };
-
 /**
  * Check if bird collides with a pipe and which part it hit
  */
@@ -169,6 +184,62 @@ const processPipeCollisions = (
             hitTop: boolean;
         },
     );
+
+/**
+ * Records the current bird position for ghost playback
+ */
+const recordBirdPosition = (s: State): State => {
+    if (s.gameEnd) return s; // Stop recording when game ends
+
+    return {
+        ...s,
+        previousGameData: {
+            birdPositions: [...s.previousGameData.birdPositions, s.birdPos.y],
+            currentIndex: s.previousGameData.currentIndex,
+        },
+    };
+};
+
+/**
+ * Updates the ghost bird position based on recorded data
+ */
+const updateGhostBird = (s: State): State => {
+    if (s.previousGameData.birdPositions.length === 0 || s.gameEnd) {
+        return { ...s, ghostBird: { ...s.ghostBird, visible: false } };
+    }
+
+    const nextIndex =
+        (s.previousGameData.currentIndex + 1) %
+        s.previousGameData.birdPositions.length;
+    const ghostY = s.previousGameData.birdPositions[nextIndex];
+
+    return {
+        ...s,
+        ghostBird: {
+            y: ghostY,
+            visible: true,
+        },
+        previousGameData: {
+            ...s.previousGameData,
+            currentIndex: nextIndex,
+        },
+    };
+};
+
+/**
+ * Resets ghost data when starting a new game
+ */
+const resetGhostData = (s: State): State => ({
+    ...s,
+    ghostBird: {
+        y: Viewport.CANVAS_HEIGHT / 2,
+        visible: false,
+    },
+    previousGameData: {
+        birdPositions: [],
+        currentIndex: 0,
+    },
+});
 
 /**
  * Updates the state by proceeding with one time step.
@@ -262,7 +333,7 @@ const tick = (s: State): State => {
           }
         : newBounceState;
 
-    return {
+    const newState = {
         ...s,
         gameEnd,
         gameVictory,
@@ -281,6 +352,8 @@ const tick = (s: State): State => {
         pipes: visiblePipes,
         bounce: finalBounceState,
     };
+
+    return recordBirdPosition(newState);
 };
 
 /**
@@ -399,10 +472,26 @@ const render = (): ((s: State) => void) => {
             youWin.style.visibility = s.gameVictory ? "visible" : "hidden";
         }
 
-        // Clear previous game elements (pipes and bird)
+        // Clear previous game elements (pipes and birds)
         clearGameElements(svg);
 
-        // Add bird using the existing image
+        // Add ghost bird (50% opacity) - only show if there's recorded data
+        if (
+            s.ghostBird.visible &&
+            s.previousGameData.birdPositions.length > 0
+        ) {
+            const ghostBirdImg = createSvgElement(svg.namespaceURI, "image", {
+                href: "assets/birb.png",
+                x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
+                y: `${s.ghostBird.y - Birb.HEIGHT / 2}`,
+                width: `${Birb.WIDTH}`,
+                height: `${Birb.HEIGHT}`,
+                opacity: "0.5", // 50% opacity for ghost bird
+            });
+            svg.appendChild(ghostBirdImg);
+        }
+
+        // Add main bird using the existing image
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
             x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
@@ -439,8 +528,13 @@ export const state$ = (csvContents: string): Observable<State> => {
         map(() => addPipe),
     );
 
+    // Ghost bird update (slower update for smoother animation)
+    const ghostBirdUpdate$ = interval(Constants.TICK_RATE_MS * 2).pipe(
+        map(() => updateGhostBird),
+    );
+
     // Combine all streams
-    return merge(space$, click$, tick$, pipeSpawn$).pipe(
+    return merge(space$, click$, tick$, pipeSpawn$, ghostBirdUpdate$).pipe(
         scan((state, reducer) => reducer(state), initialState),
         // End the stream when game ends or maximum score reached
         takeWhile(
@@ -453,6 +547,7 @@ export const state$ = (csvContents: string): Observable<State> => {
     );
 };
 
+// Game initialization
 // Game initialization
 if (typeof window !== "undefined") {
     const { protocol, hostname, port } = new URL(import.meta.url);
@@ -474,8 +569,11 @@ if (typeof window !== "undefined") {
         }),
     );
 
-    // Observable: wait for first user click
-    const click$ = fromEvent(document, "click").pipe(take(1));
+    // Observable: wait for first user click and reset ghost data
+    const click$ = fromEvent(document, "click").pipe(
+        take(1),
+        map(() => resetGhostData), // Reset ghost data when starting new game
+    );
 
     // Create render function
     const renderFn = render();
