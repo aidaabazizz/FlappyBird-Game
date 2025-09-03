@@ -27,6 +27,9 @@ import {
     merge,
     of,
     takeWhile,
+    startWith,
+    Subject,
+    tap,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -44,9 +47,9 @@ const Birb = {
 
 const Constants = {
     PIPE_WIDTH: 50, // width of pipes
-    TICK_RATE_MS: 40, // speed of bird flaps
+    TICK_RATE_MS: 35, // speed of bird flaps
     PIPE_SPAWN_INTERVAL: 2000, //distance between each pipe, side by side
-    PIPE_SPEED: 4,
+    PIPE_SPEED: 5,
     PIPE_GAP: 150, //distance between up and down pipes
     SCORE_PER_PIPE: 1,
     INITIAL_LIVES: 3,
@@ -185,6 +188,20 @@ const processPipeCollisions = (
         },
     );
 
+/**
+ * Restart function - resets the game to initial state
+ */
+const restartGame = (s: State): State => ({
+    ...initialState,
+    ghostBird: {
+        y: Viewport.CANVAS_HEIGHT / 2,
+        visible: s.ghostBird.visible,
+    },
+    previousGameData: {
+        birdPositions: s.previousGameData.birdPositions, // Keep previous data for ghost
+        currentIndex: s.previousGameData.currentIndex,
+    },
+});
 /**
  * Records the current bird position for ghost playback
  */
@@ -450,6 +467,9 @@ const render = (): ((s: State) => void) => {
     const livesText = document.querySelector("#livesText") as HTMLElement;
     const scoreText = document.querySelector("#scoreText") as HTMLElement;
     const svg = document.querySelector("#svgCanvas") as SVGSVGElement;
+    const restartButton = document.querySelector(
+        "#restartButton",
+    ) as HTMLButtonElement;
 
     // Set up the SVG viewport
     svg.setAttribute("width", `${Viewport.CANVAS_WIDTH}`);
@@ -464,12 +484,16 @@ const render = (): ((s: State) => void) => {
         scoreText.textContent = `Score: ${s.score}`;
         livesText.textContent = `Lives: ${s.lives}`;
 
-        // Show/hide game over and victory messages
+        // Show/hide game over, victory messages, and restart button
         if (gameOver) {
             gameOver.style.visibility = s.gameEnd ? "visible" : "hidden";
         }
         if (youWin) {
             youWin.style.visibility = s.gameVictory ? "visible" : "hidden";
+        }
+        if (restartButton) {
+            restartButton.style.display =
+                s.gameEnd || s.gameVictory ? "block" : "none";
         }
 
         // Clear previous game elements (pipes and birds)
@@ -486,7 +510,7 @@ const render = (): ((s: State) => void) => {
                 y: `${s.ghostBird.y - Birb.HEIGHT / 2}`,
                 width: `${Birb.WIDTH}`,
                 height: `${Birb.HEIGHT}`,
-                opacity: "0.5", // 50% opacity for ghost bird
+                opacity: "0.5",
             });
             svg.appendChild(ghostBirdImg);
         }
@@ -509,7 +533,12 @@ const render = (): ((s: State) => void) => {
 /**
  * Main state observable
  */
-export const state$ = (csvContents: string): Observable<State> => {
+/**
+ * Main state observable (without scan)
+ */
+export const state$ = (
+    csvContents: string,
+): Observable<(s: State) => State> => {
     // User input - space key
     const key$ = fromEvent<KeyboardEvent>(document, "keydown");
     const space$ = key$.pipe(
@@ -528,25 +557,32 @@ export const state$ = (csvContents: string): Observable<State> => {
         map(() => addPipe),
     );
 
-    // Ghost bird update (slower update for smoother animation)
+    // Ghost bird update
     const ghostBirdUpdate$ = interval(Constants.TICK_RATE_MS * 2).pipe(
         map(() => updateGhostBird),
     );
 
-    // Combine all streams
-    return merge(space$, click$, tick$, pipeSpawn$, ghostBirdUpdate$).pipe(
-        scan((state, reducer) => reducer(state), initialState),
-        // End the stream when game ends or maximum score reached
-        takeWhile(
-            state =>
-                !state.gameEnd &&
-                !state.gameVictory &&
-                state.score <= Constants.MAX_SCORE,
-            true,
-        ),
+    // Restart button click stream
+    const restartButton = document.querySelector("#restartButton");
+    const restart$ = restartButton
+        ? fromEvent(restartButton, "click").pipe(map(() => restartGame))
+        : of((s: State) => s);
+
+    // Combine all streams WITHOUT scan
+    return merge(
+        space$,
+        click$,
+        tick$,
+        pipeSpawn$,
+        ghostBirdUpdate$,
+        restart$,
+    ).pipe(
+        takeWhile(reducer => {
+            // We can't access state here easily, so we'll handle this differently
+            return true; // We'll handle takeWhile in the game initialization
+        }, true),
     );
 };
-
 // Game initialization
 // Game initialization
 if (typeof window !== "undefined") {
@@ -569,24 +605,55 @@ if (typeof window !== "undefined") {
         }),
     );
 
-    // Observable: wait for first user click and reset ghost data
-    const click$ = fromEvent(document, "click").pipe(
-        take(1),
-        map(() => resetGhostData), // Reset ghost data when starting new game
-    );
-
     // Create render function
     const renderFn = render();
 
-    // Start the game
+    // Create a subject to trigger game restarts
+    const restartTrigger$ = new Subject<void>();
+
+    // Main game stream that can be restarted
+    const game$ = (contents: string) => {
+        // Observable: wait for first user click and reset ghost data
+        const click$ = fromEvent(document, "click").pipe(
+            take(1),
+            map(() => resetGhostData),
+        );
+
+        return click$.pipe(
+            switchMap(initialReducer => {
+                let currentState = initialReducer(initialState);
+
+                return state$(contents).pipe(
+                    scan((state, reducer) => reducer(state), currentState),
+                    tap(state => renderFn(state)),
+                    takeWhile(
+                        state => !state.gameEnd && !state.gameVictory,
+                        true,
+                    ),
+                );
+            }),
+        );
+    };
+
+    // Start the initial game and listen for restarts
     csv$.pipe(
-        switchMap(contents => click$.pipe(switchMap(() => state$(contents)))),
+        switchMap(contents =>
+            restartTrigger$.pipe(
+                startWith(void 0), // Start immediately
+                switchMap(() => game$(contents)),
+            ),
+        ),
     ).subscribe({
-        next: state => {
-            renderFn(state);
-        },
         error: err => {
             console.error("Error in game loop:", err);
         },
     });
+
+    // Listen for restart button clicks to trigger new game
+    const restartButton = document.querySelector("#restartButton");
+    if (restartButton) {
+        fromEvent(restartButton, "click").subscribe(() => {
+            restartTrigger$.next();
+        });
+    }
 }
