@@ -29,9 +29,44 @@ import {
     takeWhile,
     startWith,
     Subject,
-    tap,
+    withLatestFrom,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
+
+/**
+ * A random number generator which provides two pure functions
+ * `hash` and `scale`. Call `hash` repeatedly to generate the
+ * sequence of hashes.
+ */
+abstract class RNG {
+    private static m = 0x80000000; // 2^31
+    private static a = 1103515245;
+    private static c = 12345;
+
+    public static hash = (seed: number): number =>
+        (RNG.a * seed + RNG.c) % RNG.m;
+
+    public static scale = (hash: number): number =>
+        (2 * hash) / (RNG.m - 1) - 1; // in [-1, 1]
+}
+
+export function createRngStreamFromSource<T>(source$: Observable<T>) {
+    return function createRngStream(seed: number = 0): Observable<number> {
+        const randomNumberStream = source$.pipe(
+            scan(
+                (state, _) => {
+                    const nextSeed = RNG.hash(state.seed);
+                    const value = RNG.scale(nextSeed);
+                    return { seed: nextSeed, value };
+                },
+                { seed, value: RNG.scale(seed) },
+            ),
+            map(({ value }) => value),
+        );
+
+        return randomNumberStream;
+    };
+}
 
 /** Constants */
 
@@ -55,13 +90,14 @@ const Constants = {
     INITIAL_LIVES: 3,
     BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
     BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
-    MAX_SCORE: 10, // the game ends after 10 points
-    MAX_PIPES: 20, // win game if passes 20 pipes/ score 20
+    MAX_SCORE: 20, // the game ends after 20 points
+    //MAX_PIPES: 20, // win game if passes 20 pipes/ score 20
 } as const;
 
 const Physics = {
     GRAVITY: 0.5,
     JUMP_STRENGTH: -8,
+    SEED: 1234,
 } as const;
 
 // State processing
@@ -87,6 +123,7 @@ type State = Readonly<{
         direction: "up" | "down";
         timer: number;
         velocity: number;
+        color: boolean;
     };
     ghostBird: {
         y: number;
@@ -118,6 +155,7 @@ const initialState: State = {
         direction: "up",
         timer: 0,
         velocity: Constants.BOUNCE_VELOCITY_MIN,
+        color: true,
     },
     ghostBird: {
         y: Viewport.CANVAS_HEIGHT / 2,
@@ -171,11 +209,18 @@ const parseCSVPipes = (
     csvContent: string,
 ): ReadonlyArray<{ gapY: number; spawnTime: number }> => {
     if (csvContent === "default") {
-        // Fallback: generate some default pipes if CSV is not available
-        return Array.from({ length: 10 }, (_, i) => ({
-            gapY: Math.random() * (Viewport.CANVAS_HEIGHT - 200) + 100,
-            spawnTime: (i + 1) * 1500, // Default timing
-        }));
+        // Fallback: generate some default pipes using functional RNG
+        const seed = Physics.SEED;
+        return Array.from({ length: 10 }, (_, i) => {
+            const hash = RNG.hash(seed + i);
+            const scaled = RNG.scale(hash); // [-1, 1]
+            const gapY =
+                ((scaled + 1) / 2) * (Viewport.CANVAS_HEIGHT - 200) + 100;
+            return {
+                gapY,
+                spawnTime: (i + 1) * 1500, // Default timing
+            };
+        });
     }
 
     return csvContent
@@ -260,29 +305,40 @@ const spawnPipesFromCSV = (s: State): State => {
  */
 const restartGame = (s: State): State => ({
     ...initialState,
-    isFirstGame: false, // A restart marks the end of the first game
-    csvPipes: s.csvPipes, // Keep the CSV pipes data
+    isFirstGame: false,
+    csvPipes: s.csvPipes,
     ghostBird: {
         y: Viewport.CANVAS_HEIGHT / 2,
-        visible: true,
+        visible: s.previousGameData.birdPositions.length > 0,
     },
     previousGameData: {
+        // Use the just-finished game's bird positions for ghost
         birdPositions: s.previousGameData.birdPositions,
-        currentIndex: s.previousGameData.currentIndex,
+        currentIndex: 0,
     },
-    gameStartTime: Date.now(), // Reset game start time
+    gameStartTime: Date.now(),
 });
 
 /**
  * Records the current bird position for ghost playback
  */
+
+const MAX_RECORDED_POSITIONS = 1000;
+
 const recordBirdPosition = (s: State): State => {
     if (s.gameEnd) return s; // Stop recording when game ends
+
+    const newPositions = [...s.previousGameData.birdPositions, s.birdPos.y];
+
+    const trimmedPositions =
+        newPositions.length > MAX_RECORDED_POSITIONS
+            ? newPositions.slice(-MAX_RECORDED_POSITIONS)
+            : newPositions;
 
     return {
         ...s,
         previousGameData: {
-            birdPositions: [...s.previousGameData.birdPositions, s.birdPos.y],
+            birdPositions: trimmedPositions,
             currentIndex: s.previousGameData.currentIndex,
         },
     };
@@ -304,7 +360,7 @@ const updateGhostBird = (s: State): State => {
 
     const currentIndex = s.previousGameData.currentIndex;
     const totalPositions = s.previousGameData.birdPositions.length;
-    
+
     // If we've reached the end of recorded data, loop back
     const nextIndex = (currentIndex + 1) % totalPositions;
     const ghostY = s.previousGameData.birdPositions[nextIndex];
@@ -340,14 +396,14 @@ const resetGhostData = (s: State): State => ({
 /**
  * Updates the state by proceeding with one time step.
  */
-const tick = (s: State): State => {
+const tick = (s: State, randomBounceVelocity: number): State => {
     if (s.gameEnd || s.gameVictory) return s;
 
     const birdX = Viewport.CANVAS_WIDTH * 0.3;
     const birdY = s.birdPos.y;
-
-    // Check if game should end due to max SCORE
-    const shouldEndFromScore = s.score >= Constants.MAX_SCORE;
+    const shouldEndFromScore =
+        s.nextPipeIndex >= s.csvPipes.length &&
+        s.pipes.every(pipe => pipe.x + Constants.PIPE_WIDTH < 0);
 
     // Handle bounce effect if active
     const newBounceState = s.bounce.active
@@ -411,14 +467,6 @@ const tick = (s: State): State => {
     const gameVictory = shouldEndFromScore;
 
     // Generate random bounce velocity
-    const randomBounceVelocity = shouldActivateBounce
-        ? Math.floor(
-              Math.random() *
-                  (Constants.BOUNCE_VELOCITY_MAX -
-                      Constants.BOUNCE_VELOCITY_MIN +
-                      1),
-          ) + Constants.BOUNCE_VELOCITY_MIN
-        : s.bounce.velocity;
 
     const finalBounceState = shouldActivateBounce
         ? {
@@ -426,6 +474,7 @@ const tick = (s: State): State => {
               direction: hitTop ? ("down" as const) : ("up" as const),
               timer: newLives === 0 ? 20 : 10,
               velocity: randomBounceVelocity,
+              color: false,
           }
         : newBounceState;
 
@@ -452,6 +501,19 @@ const tick = (s: State): State => {
     return recordBirdPosition(newState);
 };
 
+const createRngStream = createRngStreamFromSource(
+    interval(Constants.TICK_RATE_MS),
+);
+const rng$ = createRngStream(Physics.SEED).pipe(
+    map(randomValue => {
+        // Scale from [-1, 1] to [BOUNCE_VELOCITY_MIN, BOUNCE_VELOCITY_MAX]
+        return (
+            Constants.BOUNCE_VELOCITY_MIN +
+            ((randomValue + 1) / 2) *
+                (Constants.BOUNCE_VELOCITY_MAX - Constants.BOUNCE_VELOCITY_MIN)
+        );
+    }),
+);
 /**
  * Jump function - makes the bird flap
  */
@@ -610,7 +672,14 @@ export const state$ = (
     const click$ = fromEvent(document, "click").pipe(map(() => jump));
 
     // Game tick
-    const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
+    const tick$ = interval(Constants.TICK_RATE_MS).pipe(
+        withLatestFrom(rng$), // Combine with RNG values
+        map(
+            ([_, randomBounceVelocity]) =>
+                (s: State) =>
+                    tick(s, randomBounceVelocity),
+        ),
+    );
 
     // CSV pipe spawn (replace the old pipeSpawn$)
     const csvPipeSpawn$ = interval(Constants.TICK_RATE_MS).pipe(
@@ -667,9 +736,9 @@ if (typeof window !== "undefined") {
     const restartTrigger$ = new Subject<void>();
 
     // Store the last game state for ghost bird data (moved to higher scope)
-    let lastGameState: State | null = null;
 
-    // Main game stream that can be restarted
+    // ...existing code...
+
     const game$ = (contents: string) => {
         // Parse CSV pipes
         const csvPipes = parseCSVPipes(contents);
@@ -677,43 +746,34 @@ if (typeof window !== "undefined") {
         // Observable: wait for first user click
         const click$ = fromEvent(document, "click").pipe(
             take(1),
-            map(() => (s: State) => {
-                // If we have a previous game state, preserve the bird positions for ghost
-                const baseState = lastGameState ? {
-                    ...initialState,
-                    isFirstGame: false,
-                    ghostBird: {
-                        y: Viewport.CANVAS_HEIGHT / 2,
-                        visible: true,
-                    },
-                    previousGameData: {
-                        birdPositions: lastGameState.previousGameData.birdPositions,
-                        currentIndex: 0, // Reset index for new playback
-                    },
-                } : initialState;
-                
-                return {
-                    ...baseState,
-                    csvPipes: csvPipes,
-                    gameStartTime: Date.now(),
-                    nextPipeIndex: 0,
-                };
-            }),
+            map(() => (s: State) => ({
+                ...initialState,
+                isFirstGame: false,
+                ghostBird: {
+                    y: Viewport.CANVAS_HEIGHT / 2,
+                    visible: s.previousGameData.birdPositions.length > 0,
+                },
+                previousGameData: {
+                    birdPositions: s.previousGameData.birdPositions,
+                    currentIndex: 0,
+                },
+                csvPipes: csvPipes,
+                gameStartTime: Date.now(),
+                nextPipeIndex: 0,
+            })),
         );
 
         return click$.pipe(
             switchMap(initialReducer => {
-                let currentState = initialReducer(initialState);
+                const currentState = initialReducer(initialState);
 
                 return state$(contents).pipe(
-                    scan((state, reducer) => reducer(state), currentState),
-                    tap(state => {
-                        renderFn(state);
-                        // Store the state when game ends for ghost bird data
-                        if (state.gameEnd || state.gameVictory) {
-                            lastGameState = state;
-                        }
-                    }),
+                    scan((state, reducer) => {
+                        const newState = reducer(state);
+                        renderFn(newState);
+                        return newState;
+                    }, currentState),
+
                     takeWhile(
                         state => !state.gameEnd && !state.gameVictory,
                         true,
