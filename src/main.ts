@@ -138,6 +138,29 @@ type State = Readonly<{
     nextPipeIndex: number;
 }>;
 
+/**
+ * Creates a state manager that preserves ghost data between games
+ */
+const createStateManager = () => {
+    // Use a closure to maintain ghost data in a functional way
+    let previousGameGhostData: {
+        birdPositions: number[];
+    } = { birdPositions: [] };
+
+    return {
+        getGhostData: () => previousGameGhostData,
+        updateGhostData: (newData: { birdPositions: number[] }) => {
+            previousGameGhostData = newData;
+        },
+        clearGhostData: () => {
+            previousGameGhostData = { birdPositions: [] };
+        },
+    };
+};
+
+// Create the state manager
+const stateManager = createStateManager();
+
 const initialState: State = {
     isFirstGame: true,
     gameEnd: false,
@@ -300,24 +323,27 @@ const spawnPipesFromCSV = (s: State): State => {
     return s;
 };
 
-/**
- * Restart function - resets the game to initial state but keeps CSV pipes
- */
-const restartGame = (s: State): State => ({
-    ...initialState,
-    isFirstGame: false,
-    csvPipes: s.csvPipes,
-    ghostBird: {
-        y: Viewport.CANVAS_HEIGHT / 2,
-        visible: s.previousGameData.birdPositions.length > 0,
-    },
-    previousGameData: {
-        // Use the just-finished game's bird positions for ghost
-        birdPositions: s.previousGameData.birdPositions,
-        currentIndex: 0,
-    },
-    gameStartTime: Date.now(),
-});
+//* Restart function - preserves ghost data from previous game
+
+const restartGame = (s: State): State => {
+    const ghostData = stateManager.getGhostData();
+    const hasGhostData = ghostData.birdPositions.length > 0;
+
+    return {
+        ...initialState,
+        isFirstGame: false,
+        csvPipes: s.csvPipes,
+        ghostBird: {
+            y: Viewport.CANVAS_HEIGHT / 2,
+            visible: hasGhostData,
+        },
+        previousGameData: {
+            birdPositions: ghostData.birdPositions,
+            currentIndex: 0,
+        },
+        gameStartTime: Date.now(),
+    };
+};
 
 /**
  * Records the current bird position for ghost playback
@@ -326,10 +352,17 @@ const restartGame = (s: State): State => ({
 const MAX_RECORDED_POSITIONS = 1000;
 
 const recordBirdPosition = (s: State): State => {
-    if (s.gameEnd) return s; // Stop recording when game ends
+    if (s.gameEnd || s.gameVictory) {
+        // When game ends, save the positions for next game
+        if (s.previousGameData.birdPositions.length > 0) {
+            stateManager.updateGhostData({
+                birdPositions: s.previousGameData.birdPositions,
+            });
+        }
+        return s;
+    }
 
     const newPositions = [...s.previousGameData.birdPositions, s.birdPos.y];
-
     const trimmedPositions =
         newPositions.length > MAX_RECORDED_POSITIONS
             ? newPositions.slice(-MAX_RECORDED_POSITIONS)
@@ -350,32 +383,33 @@ const recordBirdPosition = (s: State): State => {
 const updateGhostBird = (s: State): State => {
     // Don't update ghost during first game or if no recorded data
     if (s.isFirstGame || s.previousGameData.birdPositions.length === 0) {
-        return { ...s, ghostBird: { ...s.ghostBird, visible: false } };
+        return s;
     }
 
-    // Only advance the ghost if we're not at the end of the game
-    if (s.gameEnd || s.gameVictory) {
-        return s; // Keep current ghost position when game ends
+    // Only advance the ghost during active gameplay
+    if (!s.gameEnd && !s.gameVictory) {
+        const currentIndex = s.previousGameData.currentIndex;
+        const totalPositions = s.previousGameData.birdPositions.length;
+
+        if (totalPositions > 0) {
+            const nextIndex = (currentIndex + 1) % totalPositions;
+            const ghostY = s.previousGameData.birdPositions[nextIndex];
+
+            return {
+                ...s,
+                ghostBird: {
+                    y: ghostY,
+                    visible: true,
+                },
+                previousGameData: {
+                    ...s.previousGameData,
+                    currentIndex: nextIndex,
+                },
+            };
+        }
     }
 
-    const currentIndex = s.previousGameData.currentIndex;
-    const totalPositions = s.previousGameData.birdPositions.length;
-
-    // If we've reached the end of recorded data, loop back
-    const nextIndex = (currentIndex + 1) % totalPositions;
-    const ghostY = s.previousGameData.birdPositions[nextIndex];
-
-    return {
-        ...s,
-        ghostBird: {
-            y: ghostY,
-            visible: true,
-        },
-        previousGameData: {
-            ...s.previousGameData,
-            currentIndex: nextIndex,
-        },
-    };
+    return s;
 };
 
 /**
@@ -735,10 +769,6 @@ if (typeof window !== "undefined") {
     // Create a subject to trigger game restarts
     const restartTrigger$ = new Subject<void>();
 
-    // Store the last game state for ghost bird data (moved to higher scope)
-
-    // ...existing code...
-
     const game$ = (contents: string) => {
         // Parse CSV pipes
         const csvPipes = parseCSVPipes(contents);
@@ -749,17 +779,19 @@ if (typeof window !== "undefined") {
             map(() => (s: State) => ({
                 ...initialState,
                 isFirstGame: false,
-                ghostBird: {
-                    y: Viewport.CANVAS_HEIGHT / 2,
-                    visible: s.previousGameData.birdPositions.length > 0,
-                },
-                previousGameData: {
-                    birdPositions: s.previousGameData.birdPositions,
-                    currentIndex: 0,
-                },
                 csvPipes: csvPipes,
                 gameStartTime: Date.now(),
                 nextPipeIndex: 0,
+                // Only show ghost if we have previous data
+                ghostBird: {
+                    y: Viewport.CANVAS_HEIGHT / 2,
+                    visible:
+                        stateManager.getGhostData().birdPositions.length > 0,
+                },
+                previousGameData: {
+                    birdPositions: stateManager.getGhostData().birdPositions,
+                    currentIndex: 0,
+                },
             })),
         );
 
