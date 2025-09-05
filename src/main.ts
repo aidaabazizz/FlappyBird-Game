@@ -92,7 +92,7 @@ const Constants = {
     BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
     BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
     MAX_SCORE: 20, // the game ends after 20 points
-    //MAX_PIPES: 20, // win game if passes 20 pipes/ score 20
+    MAX_GHOST_BIRDS: 2, // Maximum number of ghost birds to show
 } as const;
 
 const Physics = {
@@ -112,11 +112,11 @@ type State = Readonly<{
     };
     score: number;
     lives: number;
-    pipes: ReadonlyArray<{
-        readonly id: number;
-        readonly x: number;
-        readonly gapY: number;
-        readonly passed: boolean;
+    pipes: Array<{
+        id: number;
+        x: number;
+        gapY: number;
+        passed: boolean;
     }>;
     pipeIdCounter: number;
     bounce: {
@@ -126,42 +126,23 @@ type State = Readonly<{
         velocity: number;
         color: boolean;
     };
-    ghostBird: {
+    ghostBirds: Array<{
         y: number;
         visible: boolean;
-    };
-    previousGameData: {
-        birdPositions: number[];
+        positions: number[];
         currentIndex: number;
         deathIndex: number;
+    }>;
+    currentGameData: {
+        birdPositions: number[];
+        currentIndex: number;
     };
     csvPipes: ReadonlyArray<{ gapY: number; spawnTime: number }>;
     gameStartTime: number;
     nextPipeIndex: number;
 }>;
 
-/**
- * Creates a state manager that preserves ghost data between games
- */
-const createStateManager = () => {
-    // Use a closure to maintain ghost data in a functional way
-    let previousGameGhostData: {
-        birdPositions: number[];
-    } = { birdPositions: [] };
-
-    return {
-        getGhostData: () => previousGameGhostData,
-        updateGhostData: (newData: { birdPositions: number[] }) => {
-            previousGameGhostData = newData;
-        },
-        clearGhostData: () => {
-            previousGameGhostData = { birdPositions: [] };
-        },
-    };
-};
-
-// Create the state manager
-const stateManager = createStateManager();
+const MAX_RECORDED_POSITIONS = 1000;
 
 const initialState: State = {
     isFirstGame: true,
@@ -182,19 +163,46 @@ const initialState: State = {
         velocity: Constants.BOUNCE_VELOCITY_MIN,
         color: true,
     },
-    ghostBird: {
-        y: Viewport.CANVAS_HEIGHT / 2,
-        visible: false,
-    },
-    previousGameData: {
+    ghostBirds: [],
+    currentGameData: {
         birdPositions: [],
         currentIndex: 0,
-        deathIndex: -1, // Add death index to track where ghost should disappear
     },
-    csvPipes: [], // Initialize as empty
-    gameStartTime: 0, // Will be set when game starts
-    nextPipeIndex: 0, // Start from first pipe
+    csvPipes: [],
+    gameStartTime: 0,
+    nextPipeIndex: 0,
 };
+
+/**
+ * Pure function to manage ghost data between games
+ */
+const createGameManager = () => {
+    const ghostDataSubject = new BehaviorSubject<
+        Array<{
+            birdPositions: number[];
+            deathIndex: number;
+        }>
+    >([]);
+
+    return {
+        getGhostData: () => ghostDataSubject.value,
+        addGhostData: (data: {
+            birdPositions: number[];
+            deathIndex: number;
+        }) => {
+            const currentData = ghostDataSubject.value;
+            // Keep only the last MAX_GHOST_BIRDS games
+            const newData = [...currentData, data].slice(
+                -Constants.MAX_GHOST_BIRDS,
+            );
+            ghostDataSubject.next(newData);
+        },
+        clearGhostData: () => ghostDataSubject.next([]),
+        ghostData$: ghostDataSubject.asObservable(),
+    };
+};
+
+const gameManager = createGameManager();
 
 /**
  * Check if bird collides with a pipe and which part it hit
@@ -233,7 +241,7 @@ const checkPipeCollision = (
  */
 const parseCSVPipes = (
     csvContent: string,
-): ReadonlyArray<{ gapY: number; spawnTime: number }> => {
+): Array<{ gapY: number; spawnTime: number }> => {
     if (csvContent === "default") {
         // Fallback: generate some default pipes using functional RNG
         const seed = Physics.SEED;
@@ -262,6 +270,7 @@ const parseCSVPipes = (
             };
         });
 };
+
 /**
  * Check if bird hits ground or ceiling
  */
@@ -326,69 +335,44 @@ const spawnPipesFromCSV = (s: State): State => {
     return s;
 };
 
-//* Restart function - preserves ghost data from previous game
-
+/**
+ * Restart function - preserves ghost data from previous games
+ */
 const restartGame = (s: State): State => {
     const ghostData = gameManager.getGhostData();
-    const hasGhostData = ghostData.birdPositions.length > 0;
 
     return {
         ...initialState,
         isFirstGame: false,
         csvPipes: s.csvPipes,
-        ghostBird: {
+        ghostBirds: ghostData.map(data => ({
             y: Viewport.CANVAS_HEIGHT / 2,
-            visible: hasGhostData,
-        },
-        previousGameData: {
-            birdPositions: ghostData.birdPositions,
+            visible: data.birdPositions.length > 0,
+            positions: data.birdPositions,
             currentIndex: 0,
-            deathIndex: ghostData.deathIndex,
-        },
+            deathIndex: data.deathIndex,
+        })),
         gameStartTime: Date.now(),
     };
 };
 
 /**
- * Creates a ghost data stream using RxJS BehaviorSubject
+ * Records the current bird position for future ghost birds
  */
-const createGhostDataStream = () => {
-    const ghostData$ = new BehaviorSubject<{ birdPositions: number[] }>({
-        birdPositions: [],
-    });
-
-    return {
-        ghostData$: ghostData$.asObservable(),
-        updateGhostData: (data: { birdPositions: number[] }) =>
-            ghostData$.next(data),
-        getCurrentGhostData: () => ghostData$.value,
-    };
-};
-
-/**
- * Creates a ghost data manager using RxJS BehaviorSubject
- */
-
-const MAX_RECORDED_POSITIONS = 1000;
-
 const recordBirdPosition = (s: State): State => {
     if (s.gameEnd || s.gameVictory) {
-        // When game ends, save the positions for next game
-        if (s.previousGameData.birdPositions.length > 0) {
-            gameManager.updateGhostData({
-                birdPositions: s.previousGameData.birdPositions,
-                deathIndex: s.previousGameData.deathIndex,
-            });
-            // --- Add this line to update the gameManager as well ---
-            gameManager.updateGhostData({
-                birdPositions: s.previousGameData.birdPositions,
-                deathIndex: s.previousGameData.deathIndex,
+        // When game ends, save the positions and death index for next game
+        if (s.currentGameData.birdPositions.length > 0) {
+            const deathIndex = s.currentGameData.currentIndex;
+            gameManager.addGhostData({
+                birdPositions: s.currentGameData.birdPositions,
+                deathIndex: deathIndex,
             });
         }
         return s;
     }
 
-    const newPositions = [...s.previousGameData.birdPositions, s.birdPos.y];
+    const newPositions = [...s.currentGameData.birdPositions, s.birdPos.y];
     const trimmedPositions =
         newPositions.length > MAX_RECORDED_POSITIONS
             ? newPositions.slice(-MAX_RECORDED_POSITIONS)
@@ -396,109 +380,64 @@ const recordBirdPosition = (s: State): State => {
 
     return {
         ...s,
-        previousGameData: {
-            ...s.previousGameData,
+        currentGameData: {
+            ...s.currentGameData,
             birdPositions: trimmedPositions,
+            currentIndex: s.currentGameData.currentIndex + 1, // Increment the index
         },
     };
 };
 
 /**
- * Updates the ghost bird position based on recorded data
+ * Updates all ghost birds based on their recorded data
  */
-const updateGhostBird = (s: State): State => {
-    // Don't update ghost during first game or if no recorded data
-    if (s.isFirstGame || s.previousGameData.birdPositions.length === 0) {
+const updateGhostBirds = (s: State): State => {
+    if (s.isFirstGame || s.ghostBirds.length === 0) {
         return s;
     }
 
-    const { currentIndex, deathIndex, birdPositions } = s.previousGameData;
-
-    // Ghost should disappear if it reached the death point from previous game
-    if (deathIndex >= 0 && currentIndex >= deathIndex) {
-        return { ...s, ghostBird: { ...s.ghostBird, visible: false } };
-    }
-
-    // Only advance the ghost during active gameplay
-    if (!s.gameEnd && !s.gameVictory && birdPositions.length > 0) {
-        const nextIndex = currentIndex + 1;
-
-        // Check if next index would reach or exceed death point
-        if (deathIndex >= 0 && nextIndex >= deathIndex) {
-            return {
-                ...s,
-                ghostBird: {
-                    y: birdPositions[currentIndex], // Stay at last position before death
-                    visible: false, // Make invisible
-                },
-                previousGameData: {
-                    ...s.previousGameData,
-                    currentIndex: nextIndex,
-                },
-            };
+    const updatedGhostBirds = s.ghostBirds.map(ghost => {
+        // Don't update if no recorded data
+        if (ghost.positions.length === 0) {
+            return { ...ghost, visible: false };
         }
 
-        // Make sure we don't go out of bounds
-        if (nextIndex < birdPositions.length) {
-            const ghostY = birdPositions[nextIndex];
+        // Ghost should disappear if it reached the death point
+        if (ghost.deathIndex >= 0 && ghost.currentIndex >= ghost.deathIndex) {
+            return { ...ghost, visible: false };
+        }
 
-            return {
-                ...s,
-                ghostBird: {
+        // Only advance the ghost during active gameplay
+        if (!s.gameEnd && !s.gameVictory) {
+            const nextIndex = ghost.currentIndex + 1;
+
+            // Check if next index would reach or exceed death point
+            if (ghost.deathIndex >= 0 && nextIndex >= ghost.deathIndex) {
+                return {
+                    ...ghost,
+                    y: ghost.positions[ghost.currentIndex],
+                    visible: false,
+                    currentIndex: nextIndex,
+                };
+            }
+
+            // Make sure we don't go out of bounds
+            if (nextIndex < ghost.positions.length) {
+                const ghostY = ghost.positions[nextIndex];
+                return {
+                    ...ghost,
                     y: ghostY,
                     visible: true,
-                },
-                previousGameData: {
-                    ...s.previousGameData,
                     currentIndex: nextIndex,
-                },
-            };
+                };
+            }
         }
-    }
 
-    return s;
-};
-
-/**
- * Pure function to manage ghost data between games
- */
-const createGameManager = () => {
-    // Use a subject to maintain state functionally
-    const ghostDataSubject = new BehaviorSubject<{
-        birdPositions: number[];
-        deathIndex: number;
-    }>({
-        birdPositions: [],
-        deathIndex: -1,
+        return ghost;
     });
 
-    return {
-        getGhostData: () => ghostDataSubject.value,
-        updateGhostData: (data: {
-            birdPositions: number[];
-            deathIndex: number;
-        }) => ghostDataSubject.next(data),
-        ghostData$: ghostDataSubject.asObservable(),
-    };
+    return { ...s, ghostBirds: updatedGhostBirds };
 };
-
-const gameManager = createGameManager();
-/**
- * Resets ghost data when starting a new game
- */
-/*
-const resetGhostData = (s: State): State => ({
-    ...s,
-    ghostBird: {
-        y: Viewport.CANVAS_HEIGHT / 2,
-        visible: false,
-    },
-    previousGameData: {
-        birdPositions: [],
-        currentIndex: 0,
-        deathIndex:
-    },
-});
 
 /**
  * Updates the state by proceeding with one time step.
@@ -623,6 +562,7 @@ const rng$ = createRngStream(Physics.SEED).pipe(
         );
     }),
 );
+
 /**
  * Jump function - makes the bird flap
  */
@@ -724,37 +664,31 @@ const render = (): ((s: State) => void) => {
             restartButton.style.display =
                 s.gameEnd || s.gameVictory ? "block" : "none";
         }
-        if (s.ghostBird.visible) {
-            const ghostBirdImg = createSvgElement(svg.namespaceURI, "image", {
-                href: "assets/birb.png",
-                x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
-                y: `${s.ghostBird.y - Birb.HEIGHT / 2}`,
-                width: `${Birb.WIDTH}`,
-                height: `${Birb.HEIGHT}`,
-                opacity: "0.5",
-                style: "pointer-events: none;",
-            });
-            svg.appendChild(ghostBirdImg);
-        }
 
-        // Clear previous game elements (pipes and birds)
+        // Clear previous game elements (pipes, birds, and ghost birds)
         clearGameElements(svg);
 
-        // Add ghost bird (50% opacity) - only show if there's recorded data and not first game
-        if (s.ghostBird.visible) {
-            const ghostBirdImg = createSvgElement(svg.namespaceURI, "image", {
-                href: "assets/birb.png",
-                x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
-                y: `${s.ghostBird.y - Birb.HEIGHT / 2}`,
-                width: `${Birb.WIDTH}`,
-                height: `${Birb.HEIGHT}`,
-                opacity: "0.5",
-                style: "pointer-events: none;",
-            });
-            svg.appendChild(ghostBirdImg);
-        }
+        // Add ghost birds (50% opacity)
+        s.ghostBirds.forEach((ghost, index) => {
+            if (ghost.visible) {
+                const ghostBirdImg = createSvgElement(
+                    svg.namespaceURI,
+                    "image",
+                    {
+                        href: "assets/birb.png",
+                        x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
+                        y: `${ghost.y - Birb.HEIGHT / 2}`,
+                        width: `${Birb.WIDTH}`,
+                        height: `${Birb.HEIGHT}`,
+                        opacity: "0.5",
+                        style: "pointer-events: none;",
+                    },
+                );
+                svg.appendChild(ghostBirdImg);
+            }
+        });
 
-        // Add main bird using the existing image
+        // Add main bird
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
             x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
@@ -764,7 +698,7 @@ const render = (): ((s: State) => void) => {
         });
         svg.appendChild(birdImg);
 
-        // Add all pipes using forEach (functional iteration)
+        // Add all pipes
         s.pipes.forEach(pipe => renderPipe(svg, pipe));
     };
 };
@@ -798,14 +732,14 @@ export const state$ = (
         ),
     );
 
-    // CSV pipe spawn (replace the old pipeSpawn$)
+    // CSV pipe spawn
     const csvPipeSpawn$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => spawnPipesFromCSV),
     );
 
-    // Ghost bird update - synchronize with main tick
-    const ghostBirdUpdate$ = interval(Constants.TICK_RATE_MS).pipe(
-        map(() => updateGhostBird),
+    // Ghost birds update - synchronize with main tick
+    const ghostBirdsUpdate$ = interval(Constants.TICK_RATE_MS).pipe(
+        map(() => updateGhostBirds),
     );
 
     // Restart button click stream
@@ -819,8 +753,8 @@ export const state$ = (
         space$,
         click$,
         tick$,
-        csvPipeSpawn$, // Use CSV pipe spawn instead of random
-        ghostBirdUpdate$,
+        csvPipeSpawn$,
+        ghostBirdsUpdate$,
         restart$,
     );
 };
@@ -856,40 +790,37 @@ if (typeof window !== "undefined") {
         // Parse CSV pipes
         const csvPipes = parseCSVPipes(contents);
         const ghostData = gameManager.getGhostData();
-        const hasGhostData = ghostData.birdPositions.length > 0;
+
+        // Create the initial state with all the required properties
+        const createInitialState = (): State => ({
+            ...initialState,
+            isFirstGame: false,
+            csvPipes: csvPipes,
+            gameStartTime: Date.now(),
+            nextPipeIndex: 0,
+            ghostBirds: ghostData.map(data => ({
+                y: Viewport.CANVAS_HEIGHT / 2,
+                visible: data.birdPositions.length > 0,
+                positions: data.birdPositions,
+                currentIndex: 0,
+                deathIndex: data.deathIndex,
+            })),
+        });
 
         // Observable: wait for first user click
         const click$ = fromEvent(document, "click").pipe(
             take(1),
-            map(() => (s: State) => ({
-                ...initialState,
-                isFirstGame: false,
-                csvPipes: csvPipes,
-                gameStartTime: Date.now(),
-                nextPipeIndex: 0,
-                // Only show ghost if we have previous data
-                ghostBird: {
-                    y: Viewport.CANVAS_HEIGHT / 2,
-                    visible: hasGhostData,
-                },
-                previousGameData: {
-                    birdPositions: ghostData.birdPositions,
-                    currentIndex: 0,
-                    deathIndex: ghostData.deathIndex,
-                },
-            })),
+            map(() => createInitialState()),
         );
-        return click$.pipe(
-            switchMap(initialReducer => {
-                const currentState = initialReducer(initialState);
 
+        return click$.pipe(
+            switchMap(initialState => {
                 return state$(contents).pipe(
                     scan((state, reducer) => {
                         const newState = reducer(state);
                         renderFn(newState);
                         return newState;
-                    }, currentState),
-
+                    }, initialState),
                     takeWhile(
                         state => !state.gameEnd && !state.gameVictory,
                         true,
