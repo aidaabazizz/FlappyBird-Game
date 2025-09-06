@@ -89,8 +89,7 @@ const Constants = {
     INITIAL_LIVES: 3,
     BOUNCE_VELOCITY_MIN: 3, // Minimum bounce velocity
     BOUNCE_VELOCITY_MAX: 7, // Maximum bounce velocity
-    MAX_SCORE: 20, // the game ends after 20 points
-    MAX_GHOST_BIRDS: 2, // Maximum number of ghost birds to show
+    MAX_GHOST_BIRDS: 4, // Maximum number of ghost birds to show
 } as const;
 
 const Physics = {
@@ -104,6 +103,7 @@ type State = Readonly<{
     isFirstGame: boolean;
     gameEnd: boolean;
     gameVictory: boolean;
+    showRestartButton: boolean;
     birdPos: {
         y: number;
         velocity: number;
@@ -150,6 +150,7 @@ const initialState: State = {
     isFirstGame: true,
     gameEnd: false,
     gameVictory: false,
+    showRestartButton: false,
     birdPos: {
         y: Viewport.CANVAS_HEIGHT / 2,
         velocity: 0,
@@ -345,6 +346,7 @@ const restartGame = (s: State): State => {
     return {
         ...initialState,
         isFirstGame: false,
+        showRestartButton: true,
         csvPipes: s.csvPipes,
         ghostBirds: ghostData.map(data => ({
             y: data.birdPositions[0] || Viewport.CANVAS_HEIGHT / 2,
@@ -510,9 +512,12 @@ const tick = (s: State, randomBounceVelocity: number): State => {
               direction: hitTop ? ("down" as const) : ("up" as const),
               timer: newLives === 0 ? 20 : 10,
               velocity: randomBounceVelocity,
-              color: false,
+              color: true, //bird turns red upon hitting pipe
           }
-        : newBounceState;
+        : {
+              ...newBounceState,
+              color: newBounceState.active ? newBounceState.color : false, // Reset after bounce
+          };
 
     const newState = {
         ...s,
@@ -649,10 +654,10 @@ const render = (): ((s: State) => void) => {
             youWin.style.visibility = s.gameVictory ? "visible" : "hidden";
         }
         if (restartButton) {
-            restartButton.style.display =
-                s.gameEnd || s.gameVictory ? "block" : "none";
+            const shouldShow =
+                s.gameEnd || s.gameVictory || s.showRestartButton;
+            restartButton.style.display = shouldShow ? "block" : "none";
         }
-
         // Clear previous game elements (pipes, birds, and ghost birds)
         clearGameElements(svg);
 
@@ -683,6 +688,9 @@ const render = (): ((s: State) => void) => {
             y: `${s.birdPos.y - Birb.HEIGHT / 2}`,
             width: `${Birb.WIDTH}`,
             height: `${Birb.HEIGHT}`,
+            style: s.bounce.color
+                ? "filter: hue-rotate(300deg) saturate(10) brightness(1.2);"
+                : "",
         });
         svg.appendChild(birdImg);
 
@@ -694,14 +702,6 @@ const render = (): ((s: State) => void) => {
 /**
  * Creates an observable stream for ghost bird replay using proper FRP approach
  */
-const createGhostBirdReplayStream = (ghostData: {
-    birdPositions: number[];
-}): Observable<number> => {
-    return interval(Constants.TICK_RATE_MS).pipe(
-        take(ghostData.birdPositions.length),
-        map(index => ghostData.birdPositions[index]),
-    );
-};
 
 /**
  * Main state observable (without scan)
@@ -709,9 +709,6 @@ const createGhostBirdReplayStream = (ghostData: {
 export const state$ = (
     csvContents: string,
 ): Observable<(s: State) => State> => {
-    // Parse CSV pipes once
-    const csvPipes = parseCSVPipes(csvContents);
-
     // User input - space key
     const key$ = fromEvent<KeyboardEvent>(document, "keydown");
     const space$ = key$.pipe(
