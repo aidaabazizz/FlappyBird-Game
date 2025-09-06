@@ -84,20 +84,18 @@ const Birb = {
 const Constants = {
     PIPE_WIDTH: 50, // width of pipes
     TICK_RATE_MS: 30, // speed of bird flaps
-    PIPE_SPAWN_INTERVAL: 20, //distance between each pipe, side by side
-    PIPE_SPEED: 5,
-    PIPE_GAP: 150, //distance between up and down pipes
+    PIPE_SPEED: 7,
     SCORE_PER_PIPE: 1,
     INITIAL_LIVES: 3,
-    BOUNCE_VELOCITY_MIN: 5, // Minimum bounce velocity
-    BOUNCE_VELOCITY_MAX: 9, // Maximum bounce velocity
+    BOUNCE_VELOCITY_MIN: 3, // Minimum bounce velocity
+    BOUNCE_VELOCITY_MAX: 7, // Maximum bounce velocity
     MAX_SCORE: 20, // the game ends after 20 points
     MAX_GHOST_BIRDS: 2, // Maximum number of ghost birds to show
 } as const;
 
 const Physics = {
     GRAVITY: 0.5,
-    JUMP_STRENGTH: -8,
+    JUMP_STRENGTH: -7,
     SEED: 1234,
 } as const;
 
@@ -116,6 +114,7 @@ type State = Readonly<{
         id: number;
         x: number;
         gapY: number;
+        gapHeight: number;
         passed: boolean;
     }>;
     pipeIdCounter: number;
@@ -131,13 +130,16 @@ type State = Readonly<{
         visible: boolean;
         positions: number[];
         currentIndex: number;
-        deathIndex: number;
     }>;
     currentGameData: {
         birdPositions: number[];
         currentIndex: number;
     };
-    csvPipes: ReadonlyArray<{ gapY: number; spawnTime: number }>;
+    csvPipes: ReadonlyArray<{
+        gapY: number;
+        gapHeight: number;
+        spawnTime: number;
+    }>;
     gameStartTime: number;
     nextPipeIndex: number;
 }>;
@@ -180,16 +182,12 @@ const createGameManager = () => {
     const ghostDataSubject = new BehaviorSubject<
         Array<{
             birdPositions: number[];
-            deathIndex: number;
         }>
     >([]);
 
     return {
         getGhostData: () => ghostDataSubject.value,
-        addGhostData: (data: {
-            birdPositions: number[];
-            deathIndex: number;
-        }) => {
+        addGhostData: (data: { birdPositions: number[] }) => {
             const currentData = ghostDataSubject.value;
             // Keep only the last MAX_GHOST_BIRDS games
             const newData = [...currentData, data].slice(
@@ -214,8 +212,8 @@ const checkPipeCollision = (
 ): { collision: boolean; hitTop: boolean } => {
     const pipeLeft = pipe.x;
     const pipeRight = pipe.x + Constants.PIPE_WIDTH;
-    const pipeTopBottom = pipe.gapY - Constants.PIPE_GAP / 2;
-    const pipeBottomTop = pipe.gapY + Constants.PIPE_GAP / 2;
+    const pipeTopBottom = pipe.gapY - pipe.gapHeight / 2;
+    const pipeBottomTop = pipe.gapY + pipe.gapHeight / 2;
 
     const birdLeft = birdX - Birb.WIDTH / 2;
     const birdRight = birdX + Birb.WIDTH / 2;
@@ -241,7 +239,7 @@ const checkPipeCollision = (
  */
 const parseCSVPipes = (
     csvContent: string,
-): Array<{ gapY: number; spawnTime: number }> => {
+): Array<{ gapY: number; gapHeight: number; spawnTime: number }> => {
     if (csvContent === "default") {
         // Fallback: generate some default pipes using functional RNG
         const seed = Physics.SEED;
@@ -252,6 +250,7 @@ const parseCSVPipes = (
                 ((scaled + 1) / 2) * (Viewport.CANVAS_HEIGHT - 200) + 100;
             return {
                 gapY,
+                gapHeight: 150, // Default gap height
                 spawnTime: (i + 1) * 1500, // Default timing
             };
         });
@@ -266,6 +265,7 @@ const parseCSVPipes = (
             const [gap_y, gap_height, time] = line.split(",").map(Number);
             return {
                 gapY: gap_y * Viewport.CANVAS_HEIGHT, // Convert relative to absolute
+                gapHeight: gap_height * Viewport.CANVAS_HEIGHT, // Use gap_height from CSV
                 spawnTime: time * 1000, // Convert seconds to milliseconds
             };
         });
@@ -324,6 +324,7 @@ const spawnPipesFromCSV = (s: State): State => {
                     id: s.pipeIdCounter,
                     x: Viewport.CANVAS_WIDTH,
                     gapY: nextPipe.gapY,
+                    gapHeight: nextPipe.gapHeight,
                     passed: false,
                 },
             ],
@@ -346,11 +347,10 @@ const restartGame = (s: State): State => {
         isFirstGame: false,
         csvPipes: s.csvPipes,
         ghostBirds: ghostData.map(data => ({
-            y: Viewport.CANVAS_HEIGHT / 2,
+            y: data.birdPositions[0] || Viewport.CANVAS_HEIGHT / 2,
             visible: data.birdPositions.length > 0,
             positions: data.birdPositions,
             currentIndex: 0,
-            deathIndex: data.deathIndex,
         })),
         gameStartTime: Date.now(),
     };
@@ -361,12 +361,10 @@ const restartGame = (s: State): State => {
  */
 const recordBirdPosition = (s: State): State => {
     if (s.gameEnd || s.gameVictory) {
-        // When game ends, save the positions and death index for next game
+        // When game ends, save the positions for next game
         if (s.currentGameData.birdPositions.length > 0) {
-            const deathIndex = s.currentGameData.currentIndex;
             gameManager.addGhostData({
                 birdPositions: s.currentGameData.birdPositions,
-                deathIndex: deathIndex,
             });
         }
         return s;
@@ -383,7 +381,7 @@ const recordBirdPosition = (s: State): State => {
         currentGameData: {
             ...s.currentGameData,
             birdPositions: trimmedPositions,
-            currentIndex: s.currentGameData.currentIndex + 1, // Increment the index
+            currentIndex: s.currentGameData.currentIndex + 1,
         },
     };
 };
@@ -402,35 +400,27 @@ const updateGhostBirds = (s: State): State => {
             return { ...ghost, visible: false };
         }
 
-        // Ghost should disappear if it reached the death point
-        if (ghost.deathIndex >= 0 && ghost.currentIndex >= ghost.deathIndex) {
-            return { ...ghost, visible: false };
-        }
-
         // Only advance the ghost during active gameplay
         if (!s.gameEnd && !s.gameVictory) {
             const nextIndex = ghost.currentIndex + 1;
 
-            // Check if next index would reach or exceed death point
-            if (ghost.deathIndex >= 0 && nextIndex >= ghost.deathIndex) {
+            // Check if we've reached the end of recorded positions
+            if (nextIndex >= ghost.positions.length) {
                 return {
                     ...ghost,
-                    y: ghost.positions[ghost.currentIndex],
                     visible: false,
                     currentIndex: nextIndex,
                 };
             }
 
-            // Make sure we don't go out of bounds
-            if (nextIndex < ghost.positions.length) {
-                const ghostY = ghost.positions[nextIndex];
-                return {
-                    ...ghost,
-                    y: ghostY,
-                    visible: true,
-                    currentIndex: nextIndex,
-                };
-            }
+            // Update ghost position
+            const ghostY = ghost.positions[nextIndex];
+            return {
+                ...ghost,
+                y: ghostY,
+                visible: true,
+                currentIndex: nextIndex,
+            };
         }
 
         return ghost;
@@ -513,8 +503,6 @@ const tick = (s: State, randomBounceVelocity: number): State => {
     const newLives = shouldActivateBounce ? s.lives - 1 : s.lives;
     const gameEnd = newLives <= 0;
     const gameVictory = shouldEndFromScore;
-
-    // Generate random bounce velocity
 
     const finalBounceState = shouldActivateBounce
         ? {
@@ -602,7 +590,7 @@ const clearGameElements = (svg: SVGSVGElement): void => {
 };
 
 /**
- * Render a single pipe
+ * Render a single pipe with dynamic gap height
  */
 const renderPipe = (svg: SVGSVGElement, pipe: State["pipes"][0]): void => {
     // Top pipe
@@ -610,16 +598,16 @@ const renderPipe = (svg: SVGSVGElement, pipe: State["pipes"][0]): void => {
         x: `${pipe.x}`,
         y: "0",
         width: `${Constants.PIPE_WIDTH}`,
-        height: `${pipe.gapY - Constants.PIPE_GAP / 2}`,
+        height: `${pipe.gapY - pipe.gapHeight / 2}`,
         fill: "green",
     });
 
     // Bottom pipe
     const pipeBottom = createSvgElement(svg.namespaceURI, "rect", {
         x: `${pipe.x}`,
-        y: `${pipe.gapY + Constants.PIPE_GAP / 2}`,
+        y: `${pipe.gapY + pipe.gapHeight / 2}`,
         width: `${Constants.PIPE_WIDTH}`,
-        height: `${Viewport.CANVAS_HEIGHT - (pipe.gapY + Constants.PIPE_GAP / 2)}`,
+        height: `${Viewport.CANVAS_HEIGHT - (pipe.gapY + pipe.gapHeight / 2)}`,
         fill: "green",
     });
 
@@ -701,6 +689,18 @@ const render = (): ((s: State) => void) => {
         // Add all pipes
         s.pipes.forEach(pipe => renderPipe(svg, pipe));
     };
+};
+
+/**
+ * Creates an observable stream for ghost bird replay using proper FRP approach
+ */
+const createGhostBirdReplayStream = (ghostData: {
+    birdPositions: number[];
+}): Observable<number> => {
+    return interval(Constants.TICK_RATE_MS).pipe(
+        take(ghostData.birdPositions.length),
+        map(index => ghostData.birdPositions[index]),
+    );
 };
 
 /**
@@ -799,11 +799,10 @@ if (typeof window !== "undefined") {
             gameStartTime: Date.now(),
             nextPipeIndex: 0,
             ghostBirds: ghostData.map(data => ({
-                y: Viewport.CANVAS_HEIGHT / 2,
+                y: data.birdPositions[0] || Viewport.CANVAS_HEIGHT / 2,
                 visible: data.birdPositions.length > 0,
                 positions: data.birdPositions,
                 currentIndex: 0,
-                deathIndex: data.deathIndex,
             })),
         });
 
