@@ -1,17 +1,3 @@
-/**
- * Inside this file you will use the classes and functions from rx.js
- * to add visuals to the svg element in index.html, animate them, and make them interactive.
- *
- * Study and complete the tasks in observable exercises first to get ideas.
- *
- * Course Notes showing Asteroids in FRP: https://tgdwyer.github.io/asteroids/
- *
- * You will be marked on your functional programming style
- * as well as the functionality that you implement.
- *
- * Document your code!
- */
-
 import "./style.css";
 
 import {
@@ -38,6 +24,7 @@ import { fromFetch } from "rxjs/fetch";
  * A random number generator which provides two pure functions
  * `hash` and `scale`. Call `hash` repeatedly to generate the
  * sequence of hashes.
+ * all use of RNG was HEAVILY referenced from applied 4's activity.
  */
 abstract class RNG {
     private static m = 0x80000000; // 2^31
@@ -93,9 +80,9 @@ const Constants = {
 } as const;
 
 const Physics = {
-    GRAVITY: 0.5,
-    JUMP_STRENGTH: -7,
-    SEED: 1234,
+    GRAVITY: 0.5, // How fast the bird will fall
+    JUMP_STRENGTH: -7, // How high the bird will jump when user presses space key
+    SEED: 1234, // The intial seed value, it makes the randomness predictable and testable
 } as const;
 
 // State processing
@@ -144,7 +131,11 @@ type State = Readonly<{
     nextPipeIndex: number;
 }>;
 
-const MAX_RECORDED_POSITIONS = 1000;
+const MAX_RECORDED_POSITIONS = 1000; // Number of bird positions recorded during a single game
+
+/**
+ * Default state of the game
+ */
 
 const initialState: State = {
     isFirstGame: true,
@@ -273,7 +264,7 @@ const parseCSVPipes = (
 };
 
 /**
- * Check if bird hits ground or ceiling
+ * Check if bird hits any boundaries top or bottom
  */
 const checkBoundaryCollision = (
     birdY: number,
@@ -285,7 +276,7 @@ const checkBoundaryCollision = (
 });
 
 /**
- * Process pipe collisions using functional approach
+ * Process pipe collisions
  */
 const processPipeCollisions = (
     birdX: number,
@@ -306,7 +297,7 @@ const processPipeCollisions = (
     );
 
 /**
- * Spawns pipes based on CSV timing data
+ * Spawns pipes based on the CSV timing data
  */
 const spawnPipesFromCSV = (s: State): State => {
     if (s.gameEnd || s.gameVictory || s.nextPipeIndex >= s.csvPipes.length) {
@@ -338,7 +329,7 @@ const spawnPipesFromCSV = (s: State): State => {
 };
 
 /**
- * Restart function - preserves ghost data from previous games
+ * Restart function that preserves ghost data from previous games
  */
 const restartGame = (s: State): State => {
     const ghostData = gameManager.getGhostData();
@@ -488,7 +479,7 @@ const tick = (s: State, randomBounceVelocity: number): State => {
         pipe => pipe.x + Constants.PIPE_WIDTH > 0,
     );
 
-    // Check for collisions with pipes using functional approach
+    // Check for collisions with pipes
     const pipeCollision = processPipeCollisions(birdX, birdY, visiblePipes);
 
     // Check for boundary collisions
@@ -557,7 +548,7 @@ const rng$ = createRngStream(Physics.SEED).pipe(
 );
 
 /**
- * Jump function - makes the bird flap
+ * Jump function (makes the bird flap)
  */
 const jump = (s: State): State =>
     s.gameEnd || s.bounce.active
@@ -569,8 +560,6 @@ const jump = (s: State): State =>
                   velocity: Physics.JUMP_STRENGTH,
               },
           };
-
-// Rendering (side effects)
 
 /**
  * Creates an SVG element with the given properties.
@@ -586,7 +575,7 @@ const createSvgElement = (
 };
 
 /**
- * Clear all game elements from SVG using functional approach
+ * Clear all game elements from SVG
  */
 const clearGameElements = (svg: SVGSVGElement): void => {
     Array.from(svg.querySelectorAll("image, rect"))
@@ -621,7 +610,7 @@ const renderPipe = (svg: SVGSVGElement, pipe: State["pipes"][0]): void => {
 };
 
 /**
- * Main render function
+ * Main render function (all side effects are here only)
  */
 const render = (): ((s: State) => void) => {
     const gameOver = document.querySelector("#gameOver") as SVGElement;
@@ -681,7 +670,7 @@ const render = (): ((s: State) => void) => {
             }
         });
 
-        // Add main bird
+        // Add the main bird
         const birdImg = createSvgElement(svg.namespaceURI, "image", {
             href: "assets/birb.png",
             x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
@@ -700,11 +689,7 @@ const render = (): ((s: State) => void) => {
 };
 
 /**
- * Creates an observable stream for ghost bird replay using proper FRP approach
- */
-
-/**
- * Main state observable (without scan)
+ * Main state observable
  */
 export const state$ = (
     csvContents: string,
@@ -716,7 +701,7 @@ export const state$ = (
         map(() => jump),
     );
 
-    // User input - mouse click
+    // User input: mouse click
     const click$ = fromEvent(document, "click").pipe(map(() => jump));
 
     // Game tick
@@ -734,18 +719,18 @@ export const state$ = (
         map(() => spawnPipesFromCSV),
     );
 
-    // Ghost birds update - synchronize with main tick
+    // Ghost birds update: synchronize with the main tick
     const ghostBirdsUpdate$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => updateGhostBirds),
     );
 
-    // Restart button click stream
+    /**Restart button click stream */
     const restartButton = document.querySelector("#restartButton");
     const restart$ = restartButton
         ? fromEvent(restartButton, "click").pipe(map(() => restartGame))
         : of((s: State) => s);
 
-    // Combine all streams WITHOUT scan
+    // Combine all streams
     return merge(
         space$,
         click$,
@@ -840,7 +825,7 @@ if (typeof window !== "undefined") {
         },
     });
 
-    // Listen for restart button clicks to trigger new game
+    /**  Listen for restart button clicks to trigger new game */
     const restartButton = document.querySelector("#restartButton");
     if (restartButton) {
         fromEvent(restartButton, "click").subscribe(() => {
